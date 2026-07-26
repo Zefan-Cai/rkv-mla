@@ -222,7 +222,31 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed):
 _NUM = re.compile(r"-?\d[\d,]*\.?\d*")
 
 
-def extract_answer(text: str):
+def _norm(s: str) -> str:
+    s = s.strip().strip("$").replace(" ", "").replace("\\left", "").replace("\\right", "")
+    return s.rstrip(".")
+
+
+def extract_boxed(text: str):
+    """Last \\boxed{...} with brace matching."""
+    i = text.rfind("\\boxed{")
+    if i < 0:
+        return None
+    j, depth = i + 7, 1
+    while j < len(text) and depth:
+        depth += text[j] == "{"
+        depth -= text[j] == "}"
+        j += 1
+    return text[i + 7 : j - 1] if depth == 0 else None
+
+
+def extract_answer(text: str, fmt: str = "gsm8k"):
+    if fmt == "math":
+        b = extract_boxed(text)
+        if b is not None:
+            return _norm(b)
+        cand = _NUM.findall(text)
+        return _norm(cand[-1]) if cand else None
     m = re.findall(r"####\s*(-?[\d,\.]+)", text)
     cand = m[-1] if m else (_NUM.findall(text)[-1] if _NUM.findall(text) else None)
     if cand is None:
@@ -233,10 +257,24 @@ def extract_answer(text: str):
         return None
 
 
+def answers_match(pred, gold, fmt: str) -> bool:
+    if pred is None or gold is None:
+        return False
+    if fmt == "math":
+        if pred == gold:
+            return True
+        try:
+            return abs(float(pred) - float(gold)) < 1e-6
+        except (ValueError, TypeError):
+            return False
+    return abs(pred - gold) < 1e-6
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="/data/zefan/models/DeepSeek-V2-Lite-Chat")
     ap.add_argument("--data", default="/data/zefan/data/gsm8k_test.jsonl")
+    ap.add_argument("--dataset-format", default="gsm8k", choices=["gsm8k", "math"])
     ap.add_argument("--arm", required=True, choices=["full", "rkv", "snapkv", "random"])
     ap.add_argument("--budget", type=int, default=128)
     ap.add_argument("--buffer", type=int, default=32)
@@ -260,9 +298,13 @@ def main():
     problems = [json.loads(l) for l in open(args.data)][: args.n]
     results, correct = [], 0
     t0 = time.time()
+    fmt = args.dataset_format
     for i, p in enumerate(problems):
-        msgs = [{"role": "user", "content": p["question"]
-                 + "\nPlease reason step by step, and put your final answer after '####'."}]
+        if fmt == "math":
+            qtext = p["problem"] + "\nPlease reason step by step, and put your final answer within \\boxed{}."
+        else:
+            qtext = p["question"] + "\nPlease reason step by step, and put your final answer after '####'."
+        msgs = [{"role": "user", "content": qtext}]
         ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt")
         if not torch.is_tensor(ids):  # 5.x returns a BatchEncoding
             ids = ids["input_ids"]
@@ -270,12 +312,12 @@ def main():
         text, n_evict, final_kv = generate_one(
             model, tok, ids, args.arm, cfg, args.max_new, args.seed + i
         )
-        pred = extract_answer(text)
-        gold = extract_answer(p["answer"])
-        ok = pred is not None and gold is not None and abs(pred - gold) < 1e-6
+        pred = extract_answer(text, fmt)
+        gold = _norm(str(p["answer"])) if fmt == "math" else extract_answer(str(p["answer"]))
+        ok = answers_match(pred, gold, fmt)
         correct += ok
         results.append({
-            "i": i, "correct": bool(ok), "pred": pred, "gold": gold,
+            "i": i, "correct": bool(ok), "pred": str(pred), "gold": str(gold),
             "n_evictions": n_evict, "final_kv": final_kv,
             "gen_tokens": len(tok(text).input_ids), "wall_s": round(time.time() - tw, 1),
         })
