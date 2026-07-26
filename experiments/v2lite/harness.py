@@ -85,6 +85,8 @@ def importance_from_rows(rows: list[torch.Tensor], n: int, kernel: int) -> torch
     ``n_t <= n``. Rows are zero-padded on the right — identical to the causal
     zeros the reference sees. Returns ``[n]`` fp32.
     """
+    if not rows:
+        return torch.zeros(n, dtype=torch.float32)
     heads = rows[0].shape[0]
     padded = torch.zeros(len(rows), heads, n, dtype=torch.float32)
     for i, r in enumerate(rows):
@@ -162,6 +164,7 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed):
             del rows[l][:-cfg.window_size]
 
     need_attn = arm in ("rkv", "snapkv")
+    arm_thresh = cfg.budget + cfg.buffer  # eviction trigger
     T = prompt_ids.shape[1]
     out = model(
         input_ids=prompt_ids.to(device),
@@ -197,16 +200,20 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed):
             n_evict += 1
 
         kv = cache_len(cache)
+        # Attention rows only matter for the window_size steps before the next
+        # trigger; skipping output_attentions elsewhere avoids 47 GPU->CPU
+        # copies per step (the dominant per-step overhead on long generations).
+        want_attn = need_attn and (kv + 1 >= arm_thresh - cfg.window_size)
         out = model(
             input_ids=torch.tensor([[nxt]], device=device),
             attention_mask=torch.ones(1, kv + 1, dtype=torch.long, device=device),
             position_ids=torch.tensor([[abs_pos]], device=device),
             past_key_values=cache,
             use_cache=True,
-            output_attentions=need_attn,
+            output_attentions=want_attn,
         )
         cache = out.past_key_values
-        if need_attn:
+        if want_attn:
             record_rows(out.attentions, 1)
         abs_pos += 1
 
@@ -290,9 +297,10 @@ def main():
         global_selection=True,
     )
     tok = AutoTokenizer.from_pretrained(args.model)
+    impl = "eager" if args.arm in ("rkv", "snapkv") else "sdpa"
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype=torch.bfloat16, device_map="cuda:0",
-        attn_implementation="eager",
+        attn_implementation=impl,
     ).eval()
 
     problems = [json.loads(l) for l in open(args.data)][: args.n]
