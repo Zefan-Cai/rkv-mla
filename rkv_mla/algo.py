@@ -14,8 +14,9 @@ which score per KV head on MHA/GQA models):
   recomputes the logits from cached indexer keys + an observation window of
   indexer queries (ReLU-weighted sum over indexer heads, DeepSeek-style:
   ``score(t, i) = sum_h w[t,h] * relu(q[t,h] . k[i])``).
-* Redundancy is cosine similarity on the shared entries (full 576-dim entry, or
-  only the 512-dim latent part -- see ``RKVMLAConfig.redundancy_source``), with
+* Redundancy is cosine similarity on the shared entries -- by default only the
+  512-dim latent part (the 64 rope dims encode position, not content; the full
+  576-dim entry is kept behind ``RKVMLAConfig.redundancy_source`` for ablation) -- with
   R-KV's exact rules (diagonal zeroed, threshold 0.5, most-recent similar
   neighbour exempted, column mean, softmax). Both the naive O(n^2)-memory
   reference and an exact linear-memory formulation are provided and must agree.
@@ -58,7 +59,8 @@ class RKVMLAConfig:
     threshold: float = 0.5      # redundancy cosine-similarity threshold
     kv_lora_rank: int = 512     # latent dims of the shared entry (GLM-5.2: 512)
     rope_dim: int = 64          # rope dims of the shared entry (GLM-5.2: 64)
-    redundancy_source: str = "entry"   # "entry" = full 576-dim, "latent" = first kv_lora_rank dims
+    redundancy_source: str = "latent"  # "latent" = first kv_lora_rank dims (default: rope dims
+                                       # encode position, not content); "entry" = full 576-dim, kept for ablation
     redundancy_impl: str = "linear"    # "linear" or "naive"
     global_selection: bool = False     # one kept set across ALL groups (vLLM-port style)
 

@@ -12,9 +12,10 @@ Core adaptations vs. original R-KV (MHA/GQA):
 - **importance comes from the DSA lightning-indexer logits** (engine-provided,
   or recomputed from cached indexer keys + an observation window of indexer
   queries) instead of attention probabilities;
-- **redundancy** is key-cosine on the shared 576-dim entries (or the 512-dim
-  latent part), with R-KV's exact rules, in both a naive O(n²) reference and an
-  exact linear-memory formulation;
+- **redundancy** is key-cosine on the **512-dim latent part** of the shared
+  entries by default (the 64 rope dims encode position, not content; the full
+  576-dim entry remains available for ablation), with R-KV's exact rules, in
+  both a naive O(n²) reference and an exact linear-memory formulation;
 - eviction compacts **two pools consistently** (MLA latent cache + indexer
   key/scale cache) and needs **no RoPE re-rotation** (rope is baked into the
   cached entries at absolute positions).
@@ -60,7 +61,8 @@ python3 -c "from rkv_mla.simulate import run_simulation; print(run_simulation())
    latent-cosine redundancy against full-KV baselines).
 2. **DSA indexer-importance validation** — DeepSeek-V3.2-style or GLM-5.2
    checkpoints: compare indexer-logit importance vs recomputed-attention
-   importance on real traces; ablate `redundancy_source` (entry vs latent),
+   importance on real traces; confirm the latent-only redundancy default
+   against the full-entry ablation,
    softmax-vs-raw logits, per-group vs `global_selection`.
 3. **GLM-5.2-FP8 on B200** — SGLang integration (dual-pool relocation hook in
    the MLA + `key&key_scale` pools, buffer-cadence scheduler hook), long-CoT

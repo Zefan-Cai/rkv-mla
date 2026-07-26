@@ -89,10 +89,14 @@ softmax-normalized redundancy term so that `λ` keeps its R-KV meaning.
 ### 2.3 Redundancy on the shared entries (and its linear-exact form)
 
 R-KV's redundancy is per-head key cosine similarity. The MLA substitute is
-cosine similarity on the **shared entries** — either the full 576-dim entry
-(`redundancy_source="entry"`) or only the 512-dim latent part (`"latent"`,
-which excludes rope phase information that encodes *position* rather than
-*content*; which is better is an empirical question, hence the flag).
+cosine similarity on the **shared entries** — by default on the **512-dim
+latent part only** (`redundancy_source="latent"`): the 64 decoupled-rope dims
+encode *position*, not *content*, so including them lets two content-similar
+tokens at distant positions look dissimilar (and near neighbours look more
+similar) for reasons redundancy should not care about. The full 576-dim entry
+stays available as `redundancy_source="entry"` for ablation; the DSA
+importance validation pass (see README next steps) should confirm the choice
+on real traces.
 
 All of R-KV's exact rules are kept: L2-normalize, zero the diagonal,
 threshold 0.5, exempt each row's most-recent similar neighbour
@@ -197,13 +201,17 @@ slot — the verification exists precisely to make that impossible.
   contents depend on the *generation*, breaking content-addressed prefix reuse
   (both R-KV ports simply disable radix/prefix caching). ShadowRadix-style
   virtual-slot trees make this harder, not easier.
-- **MTP / speculative-decoding draft invalidation.**
+- **MTP / speculative-decoding interaction — UNCONFIRMED.**
   `index_share_for_mtp_iteration` reuses indexer selections across MTP draft
-  iterations; evicting between draft and verify would dangle draft-selected
-  slots. Eviction must be fenced to run only at accepted-token boundaries
-  (never mid-draft), and the R-KV ports do not support speculative decoding at
-  all today — GLM-5.2 is routinely served with MTP+EAGLE, so this is a real
-  integration cost, not a corner case.
+  iterations, and our *working assumption* is that evicting between draft and
+  verify would dangle draft-selected slots, so eviction would have to be
+  fenced to accepted-token boundaries (never mid-draft). We have not verified
+  this against an actual MTP-serving implementation — the reuse might be
+  index-value-based rather than slot-based, or drafts might be re-validated
+  anyway, either of which would weaken the constraint. Since GLM-5.2 is
+  routinely served with MTP+EAGLE and no R-KV port supports speculative
+  decoding today, reading this out of the SGLang/vLLM MTP path (or a small
+  experiment) should happen before the integration is designed around it.
 - **Softmax on indexer logits** is a design choice (see §2.2): it preserves
   R-KV's λ semantics but discards the logits' absolute scale, which may carry
   signal (a step whose top logit is huge is more "certain"). Alternatives
