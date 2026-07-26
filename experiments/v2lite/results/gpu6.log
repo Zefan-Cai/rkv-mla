@@ -1,0 +1,45 @@
++ cd /data/zefan/kv-issue-work/rkv-mla
++ source /data/zefan/kv-issue-work/LMCache/fix-qring-row-mapping/venv/bin/activate
+++ deactivate nondestructive
+++ '[' -n '' ']'
+++ '[' -n '' ']'
+++ '[' -n /usr/bin/bash -o -n '' ']'
+++ hash -r
+++ '[' -n '' ']'
+++ unset VIRTUAL_ENV
+++ unset VIRTUAL_ENV_PROMPT
+++ '[' '!' nondestructive = nondestructive ']'
+++ VIRTUAL_ENV=/data/zefan/kv-issue-work/LMCache/fix-qring-row-mapping/venv
+++ export VIRTUAL_ENV
+++ _OLD_VIRTUAL_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+++ PATH=/data/zefan/kv-issue-work/LMCache/fix-qring-row-mapping/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+++ export PATH
+++ '[' -n '' ']'
+++ '[' -z '' ']'
+++ _OLD_VIRTUAL_PS1=
+++ PS1='(venv) '
+++ export PS1
+++ VIRTUAL_ENV_PROMPT='(venv) '
+++ export VIRTUAL_ENV_PROMPT
+++ '[' -n /usr/bin/bash -o -n '' ']'
+++ hash -r
++ export PYTHONPATH=/data/zefan/kv-issue-work/rkv-mla CUDA_VISIBLE_DEVICES=6
++ PYTHONPATH=/data/zefan/kv-issue-work/rkv-mla
++ CUDA_VISIBLE_DEVICES=6
++ for cmd in "rkv 128" "rkv 256" "full 128"
++ set -- rkv 128
++ python experiments/v2lite/harness.py --arm rkv --budget 128 --n 50 --out results/rkv_b128.json
++ echo 'ARM_DONE rkv b128 rc=0'
+ARM_DONE rkv b128 rc=0
++ for cmd in "rkv 128" "rkv 256" "full 128"
++ set -- rkv 256
++ python experiments/v2lite/harness.py --arm rkv --budget 256 --n 50 --out results/rkv_b256.json
++ echo 'ARM_DONE rkv b256 rc=0'
+ARM_DONE rkv b256 rc=0
++ for cmd in "rkv 128" "rkv 256" "full 128"
++ set -- full 128
++ python experiments/v2lite/harness.py --arm full --budget 128 --n 50 --out results/full_b128.json
++ echo 'ARM_DONE full b128 rc=0'
+ARM_DONE full b128 rc=0
++ echo GPU6_ALL_DONE
+GPU6_ALL_DONE

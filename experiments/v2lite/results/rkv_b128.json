@@ -1,0 +1,514 @@
+{
+ "summary": {
+  "arm": "rkv",
+  "budget": 128,
+  "buffer": 32,
+  "mix_lambda": 0.1,
+  "n": 50,
+  "accuracy": 0.22,
+  "mean_evictions": 6.1,
+  "wall_total_s": 2113.7
+ },
+ "results": [
+  {
+   "i": 0,
+   "correct": false,
+   "pred": 14.0,
+   "gold": 18.0,
+   "n_evictions": 8,
+   "final_kv": 147,
+   "gen_tokens": 316,
+   "wall_s": 57.6
+  },
+  {
+   "i": 1,
+   "correct": true,
+   "pred": 3.0,
+   "gold": 3.0,
+   "n_evictions": 3,
+   "final_kv": 146,
+   "gen_tokens": 193,
+   "wall_s": 24.4
+  },
+  {
+   "i": 2,
+   "correct": false,
+   "pred": 125000.0,
+   "gold": 70000.0,
+   "n_evictions": 7,
+   "final_kv": 159,
+   "gen_tokens": 303,
+   "wall_s": 52.3
+  },
+  {
+   "i": 3,
+   "correct": true,
+   "pred": 540.0,
+   "gold": 540.0,
+   "n_evictions": 1,
+   "final_kv": 148,
+   "gen_tokens": 122,
+   "wall_s": 9.6
+  },
+  {
+   "i": 4,
+   "correct": false,
+   "pred": 0.0,
+   "gold": 20.0,
+   "n_evictions": 10,
+   "final_kv": 141,
+   "gen_tokens": 327,
+   "wall_s": 70.7
+  },
+  {
+   "i": 5,
+   "correct": false,
+   "pred": 1.08,
+   "gold": 64.0,
+   "n_evictions": 9,
+   "final_kv": 137,
+   "gen_tokens": 346,
+   "wall_s": 66.1
+  },
+  {
+   "i": 6,
+   "correct": true,
+   "pred": 260.0,
+   "gold": 260.0,
+   "n_evictions": 5,
+   "final_kv": 141,
+   "gen_tokens": 238,
+   "wall_s": 37.9
+  },
+  {
+   "i": 7,
+   "correct": false,
+   "pred": 2.0,
+   "gold": 160.0,
+   "n_evictions": 12,
+   "final_kv": 133,
+   "gen_tokens": 425,
+   "wall_s": 85.2
+  },
+  {
+   "i": 8,
+   "correct": false,
+   "pred": 30.0,
+   "gold": 45.0,
+   "n_evictions": 9,
+   "final_kv": 141,
+   "gen_tokens": 301,
+   "wall_s": 63.2
+  },
+  {
+   "i": 9,
+   "correct": false,
+   "pred": 48.0,
+   "gold": 460.0,
+   "n_evictions": 5,
+   "final_kv": 159,
+   "gen_tokens": 237,
+   "wall_s": 37.7
+  },
+  {
+   "i": 10,
+   "correct": true,
+   "pred": 366.0,
+   "gold": 366.0,
+   "n_evictions": 7,
+   "final_kv": 139,
+   "gen_tokens": 280,
+   "wall_s": 51.1
+  },
+  {
+   "i": 11,
+   "correct": false,
+   "pred": 364.0,
+   "gold": 694.0,
+   "n_evictions": 4,
+   "final_kv": 145,
+   "gen_tokens": 186,
+   "wall_s": 30.4
+  },
+  {
+   "i": 12,
+   "correct": false,
+   "pred": 1.5,
+   "gold": 13.0,
+   "n_evictions": 10,
+   "final_kv": 148,
+   "gen_tokens": 379,
+   "wall_s": 71.8
+  },
+  {
+   "i": 13,
+   "correct": false,
+   "pred": 6.0,
+   "gold": 18.0,
+   "n_evictions": 9,
+   "final_kv": 133,
+   "gen_tokens": 339,
+   "wall_s": 64.1
+  },
+  {
+   "i": 14,
+   "correct": true,
+   "pred": 60.0,
+   "gold": 60.0,
+   "n_evictions": 4,
+   "final_kv": 154,
+   "gen_tokens": 205,
+   "wall_s": 27.9
+  },
+  {
+   "i": 15,
+   "correct": false,
+   "pred": 8400.0,
+   "gold": 125.0,
+   "n_evictions": 10,
+   "final_kv": 157,
+   "gen_tokens": 360,
+   "wall_s": 72.5
+  },
+  {
+   "i": 16,
+   "correct": false,
+   "pred": 160.0,
+   "gold": 230.0,
+   "n_evictions": 9,
+   "final_kv": 148,
+   "gen_tokens": 360,
+   "wall_s": 67.9
+  },
+  {
+   "i": 17,
+   "correct": false,
+   "pred": 31500.0,
+   "gold": 57500.0,
+   "n_evictions": 8,
+   "final_kv": 131,
+   "gen_tokens": 306,
+   "wall_s": 56.0
+  },
+  {
+   "i": 18,
+   "correct": false,
+   "pred": 4.0,
+   "gold": 7.0,
+   "n_evictions": 6,
+   "final_kv": 157,
+   "gen_tokens": 299,
+   "wall_s": 45.7
+  },
+  {
+   "i": 19,
+   "correct": false,
+   "pred": 1.0,
+   "gold": 6.0,
+   "n_evictions": 4,
+   "final_kv": 129,
+   "gen_tokens": 168,
+   "wall_s": 28.6
+  },
+  {
+   "i": 20,
+   "correct": false,
+   "pred": 100.0,
+   "gold": 15.0,
+   "n_evictions": 14,
+   "final_kv": 153,
+   "gen_tokens": 511,
+   "wall_s": 92.9
+  },
+  {
+   "i": 21,
+   "correct": false,
+   "pred": 6.0,
+   "gold": 14.0,
+   "n_evictions": 5,
+   "final_kv": 147,
+   "gen_tokens": 238,
+   "wall_s": 33.7
+  },
+  {
+   "i": 22,
+   "correct": true,
+   "pred": 7.0,
+   "gold": 7.0,
+   "n_evictions": 4,
+   "final_kv": 145,
+   "gen_tokens": 194,
+   "wall_s": 29.5
+  },
+  {
+   "i": 23,
+   "correct": false,
+   "pred": 4.0,
+   "gold": 8.0,
+   "n_evictions": 3,
+   "final_kv": 137,
+   "gen_tokens": 170,
+   "wall_s": 21.2
+  },
+  {
+   "i": 24,
+   "correct": false,
+   "pred": 78.0,
+   "gold": 26.0,
+   "n_evictions": 4,
+   "final_kv": 143,
+   "gen_tokens": 207,
+   "wall_s": 30.2
+  },
+  {
+   "i": 25,
+   "correct": false,
+   "pred": 33.0,
+   "gold": 2.0,
+   "n_evictions": 9,
+   "final_kv": 144,
+   "gen_tokens": 342,
+   "wall_s": 69.0
+  },
+  {
+   "i": 26,
+   "correct": false,
+   "pred": 117.5,
+   "gold": 243.0,
+   "n_evictions": 4,
+   "final_kv": 138,
+   "gen_tokens": 175,
+   "wall_s": 26.4
+  },
+  {
+   "i": 27,
+   "correct": false,
+   "pred": 240.0,
+   "gold": 16.0,
+   "n_evictions": 3,
+   "final_kv": 156,
+   "gen_tokens": 171,
+   "wall_s": 22.3
+  },
+  {
+   "i": 28,
+   "correct": false,
+   "pred": 60.0,
+   "gold": 25.0,
+   "n_evictions": 2,
+   "final_kv": 156,
+   "gen_tokens": 146,
+   "wall_s": 17.3
+  },
+  {
+   "i": 29,
+   "correct": false,
+   "pred": 66.0,
+   "gold": 104.0,
+   "n_evictions": 7,
+   "final_kv": 159,
+   "gen_tokens": 293,
+   "wall_s": 46.8
+  },
+  {
+   "i": 30,
+   "correct": false,
+   "pred": 99.0,
+   "gold": 109.0,
+   "n_evictions": 8,
+   "final_kv": 138,
+   "gen_tokens": 330,
+   "wall_s": 50.3
+  },
+  {
+   "i": 31,
+   "correct": false,
+   "pred": 3.0,
+   "gold": 80.0,
+   "n_evictions": 5,
+   "final_kv": 155,
+   "gen_tokens": 229,
+   "wall_s": 32.6
+  },
+  {
+   "i": 32,
+   "correct": false,
+   "pred": 5.0,
+   "gold": 35.0,
+   "n_evictions": 2,
+   "final_kv": 157,
+   "gen_tokens": 157,
+   "wall_s": 15.0
+  },
+  {
+   "i": 33,
+   "correct": false,
+   "pred": 110.0,
+   "gold": 70.0,
+   "n_evictions": 6,
+   "final_kv": 151,
+   "gen_tokens": 290,
+   "wall_s": 39.2
+  },
+  {
+   "i": 34,
+   "correct": true,
+   "pred": 23.0,
+   "gold": 23.0,
+   "n_evictions": 2,
+   "final_kv": 145,
+   "gen_tokens": 144,
+   "wall_s": 14.8
+  },
+  {
+   "i": 35,
+   "correct": false,
+   "pred": 90.0,
+   "gold": 9.0,
+   "n_evictions": 7,
+   "final_kv": 153,
+   "gen_tokens": 301,
+   "wall_s": 44.8
+  },
+  {
+   "i": 36,
+   "correct": false,
+   "pred": 300.0,
+   "gold": 75.0,
+   "n_evictions": 1,
+   "final_kv": 152,
+   "gen_tokens": 118,
+   "wall_s": 9.0
+  },
+  {
+   "i": 37,
+   "correct": false,
+   "pred": 35.0,
+   "gold": 2.0,
+   "n_evictions": 6,
+   "final_kv": 146,
+   "gen_tokens": 252,
+   "wall_s": 38.4
+  },
+  {
+   "i": 38,
+   "correct": false,
+   "pred": 60.0,
+   "gold": 10.0,
+   "n_evictions": 6,
+   "final_kv": 158,
+   "gen_tokens": 283,
+   "wall_s": 39.1
+  },
+  {
+   "i": 39,
+   "correct": false,
+   "pred": 1.0,
+   "gold": 18.0,
+   "n_evictions": 11,
+   "final_kv": 148,
+   "gen_tokens": 403,
+   "wall_s": 67.9
+  },
+  {
+   "i": 40,
+   "correct": true,
+   "pred": 8.0,
+   "gold": 8.0,
+   "n_evictions": 1,
+   "final_kv": 143,
+   "gen_tokens": 102,
+   "wall_s": 8.5
+  },
+  {
+   "i": 41,
+   "correct": false,
+   "pred": 400.0,
+   "gold": 200.0,
+   "n_evictions": 5,
+   "final_kv": 136,
+   "gen_tokens": 145,
+   "wall_s": 29.7
+  },
+  {
+   "i": 42,
+   "correct": true,
+   "pred": 26.0,
+   "gold": 26.0,
+   "n_evictions": 4,
+   "final_kv": 131,
+   "gen_tokens": 155,
+   "wall_s": 25.0
+  },
+  {
+   "i": 43,
+   "correct": false,
+   "pred": 5.0,
+   "gold": 48.0,
+   "n_evictions": 5,
+   "final_kv": 136,
+   "gen_tokens": 212,
+   "wall_s": 31.9
+  },
+  {
+   "i": 44,
+   "correct": false,
+   "pred": 1.05,
+   "gold": 20.0,
+   "n_evictions": 9,
+   "final_kv": 139,
+   "gen_tokens": 330,
+   "wall_s": 55.7
+  },
+  {
+   "i": 45,
+   "correct": false,
+   "pred": 36.0,
+   "gold": 104.0,
+   "n_evictions": 11,
+   "final_kv": 154,
+   "gen_tokens": 391,
+   "wall_s": 67.7
+  },
+  {
+   "i": 46,
+   "correct": false,
+   "pred": 60.0,
+   "gold": 163.0,
+   "n_evictions": 7,
+   "final_kv": 144,
+   "gen_tokens": 247,
+   "wall_s": 43.0
+  },
+  {
+   "i": 47,
+   "correct": false,
+   "pred": 2000.0,
+   "gold": 800.0,
+   "n_evictions": 7,
+   "final_kv": 130,
+   "gen_tokens": 281,
+   "wall_s": 44.1
+  },
+  {
+   "i": 48,
+   "correct": true,
+   "pred": 8.0,
+   "gold": 8.0,
+   "n_evictions": 1,
+   "final_kv": 132,
+   "gen_tokens": 105,
+   "wall_s": 8.3
+  },
+  {
+   "i": 49,
+   "correct": true,
+   "pred": 30.0,
+   "gold": 30.0,
+   "n_evictions": 6,
+   "final_kv": 150,
+   "gen_tokens": 275,
+   "wall_s": 38.9
+  }
+ ]
+}

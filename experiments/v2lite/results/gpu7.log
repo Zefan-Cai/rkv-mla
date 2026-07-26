@@ -1,0 +1,50 @@
++ cd /data/zefan/kv-issue-work/rkv-mla
++ source /data/zefan/kv-issue-work/LMCache/fix-qring-row-mapping/venv/bin/activate
+++ deactivate nondestructive
+++ '[' -n '' ']'
+++ '[' -n '' ']'
+++ '[' -n /usr/bin/bash -o -n '' ']'
+++ hash -r
+++ '[' -n '' ']'
+++ unset VIRTUAL_ENV
+++ unset VIRTUAL_ENV_PROMPT
+++ '[' '!' nondestructive = nondestructive ']'
+++ VIRTUAL_ENV=/data/zefan/kv-issue-work/LMCache/fix-qring-row-mapping/venv
+++ export VIRTUAL_ENV
+++ _OLD_VIRTUAL_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+++ PATH=/data/zefan/kv-issue-work/LMCache/fix-qring-row-mapping/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+++ export PATH
+++ '[' -n '' ']'
+++ '[' -z '' ']'
+++ _OLD_VIRTUAL_PS1=
+++ PS1='(venv) '
+++ export PS1
+++ VIRTUAL_ENV_PROMPT='(venv) '
+++ export VIRTUAL_ENV_PROMPT
+++ '[' -n /usr/bin/bash -o -n '' ']'
+++ hash -r
++ export PYTHONPATH=/data/zefan/kv-issue-work/rkv-mla CUDA_VISIBLE_DEVICES=7
++ PYTHONPATH=/data/zefan/kv-issue-work/rkv-mla
++ CUDA_VISIBLE_DEVICES=7
++ for cmd in "snapkv 128" "snapkv 256" "random 128" "random 256"
++ set -- snapkv 128
++ python experiments/v2lite/harness.py --arm snapkv --budget 128 --n 50 --out results/snapkv_b128.json
++ echo 'ARM_DONE snapkv b128 rc=0'
+ARM_DONE snapkv b128 rc=0
++ for cmd in "snapkv 128" "snapkv 256" "random 128" "random 256"
++ set -- snapkv 256
++ python experiments/v2lite/harness.py --arm snapkv --budget 256 --n 50 --out results/snapkv_b256.json
++ echo 'ARM_DONE snapkv b256 rc=0'
+ARM_DONE snapkv b256 rc=0
++ for cmd in "snapkv 128" "snapkv 256" "random 128" "random 256"
++ set -- random 128
++ python experiments/v2lite/harness.py --arm random --budget 128 --n 50 --out results/random_b128.json
++ echo 'ARM_DONE random b128 rc=0'
+ARM_DONE random b128 rc=0
++ for cmd in "snapkv 128" "snapkv 256" "random 128" "random 256"
++ set -- random 256
++ python experiments/v2lite/harness.py --arm random --budget 256 --n 50 --out results/random_b256.json
++ echo 'ARM_DONE random b256 rc=0'
+ARM_DONE random b256 rc=0
++ echo GPU7_ALL_DONE
+GPU7_ALL_DONE
