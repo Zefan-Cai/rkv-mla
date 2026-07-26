@@ -213,7 +213,12 @@ slot — the verification exists precisely to make that impossible.
   what exists — if eviction keeps ≥2048-ish tokens the attention pattern is
   plausibly unchanged (the indexer would mostly have selected kept tokens
   anyway), but budgets below `index_topk` change the effective attention,
-  not just memory. Needs empirical validation (DeepSeek-V2-Lite first).
+  not just memory. Needs empirical validation. **Update (2026-07-26):**
+  DeepSeek-V2-Lite GSM8K (`experiments/v2lite/RESULTS.md`) validated the
+  *mechanism* (budget-256 eviction is lossless vs full-KV) but could not test
+  the *accuracy edge* — V2-Lite is a non-reasoning, short-generation model, so
+  no scoring method (rkv/snapkv) separated from random. This calibration
+  question can only be answered on a reasoning MLA model (GLM-5.2).
 - **Prefix / radix-cache invalidation.** Query-dependent eviction makes cache
   contents depend on the *generation*, breaking content-addressed prefix reuse
   (both R-KV ports simply disable radix/prefix caching). ShadowRadix-style
