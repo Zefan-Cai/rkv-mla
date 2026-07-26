@@ -1,0 +1,296 @@
+# SPDX-License-Identifier: Apache-2.0
+"""R-KV-MLA validation harness on DeepSeek-V2-Lite-Chat (HF, single GPU).
+
+Validates the two core adaptation decisions on real MLA weights:
+
+* redundancy on the 512-dim shared latent (hooked from ``kv_a_layernorm`` —
+  what a latent-serving engine would cache), scored with
+  ``rkv_mla.redundancy_linear``;
+* eviction without RoPE re-rotation: kept tokens keep their absolute
+  positions; the cache is simply gathered.
+
+Importance uses the model's own attention probabilities (``eager`` attention
+with ``output_attentions=True``). This is mathematically identical to the
+absorbed-form computation (q_nope . k_nope == (q_nope W_UK) . c_kv) and avoids
+re-implementing rope/absorption. The treatment then follows R-KV exactly:
+mean over the last ``window_size`` observation rows, max-pool smoothing
+(kernel 7), max over heads (all heads share the MLA entry — the GQA-group
+analogue).
+
+Arms:
+  full    — no eviction (baseline)
+  rkv     — Z = lambda*I - (1-lambda)*R, lambda=0.1
+  snapkv  — importance only (lambda=1), same cadence/budget
+  random  — random kept set, same cadence/budget
+
+Decode-time periodic eviction: trigger when cache_len >= budget + buffer,
+keep budget tokens (window always kept), identical set across all 27 layers
+(global selection, matching the R-KV vLLM port).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import time
+
+import torch
+import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from rkv_mla.algo import RKVMLAConfig, redundancy_linear
+
+
+# ---------------------------------------------------------------------------
+# Cache surgery (transformers DynamicCache, 4.x/5.x layouts)
+# ---------------------------------------------------------------------------
+
+
+def _cache_tensors(cache, layer):
+    if hasattr(cache, "layers"):  # 5.x
+        lyr = cache.layers[layer]
+        return lyr, "keys", "values"
+    return cache, None, None  # 4.x fallback handled in gather
+
+
+def cache_len(cache) -> int:
+    if hasattr(cache, "layers"):
+        return cache.layers[0].keys.shape[-2]
+    return cache.key_cache[0].shape[-2]
+
+
+def gather_cache(cache, keep: torch.Tensor) -> None:
+    """In-place: keep only ``keep`` (ascending LongTensor) positions, all layers."""
+    n_layers = len(cache.layers) if hasattr(cache, "layers") else len(cache.key_cache)
+    for l in range(n_layers):
+        if hasattr(cache, "layers"):
+            lyr = cache.layers[l]
+            lyr.keys = lyr.keys.index_select(-2, keep.to(lyr.keys.device))
+            lyr.values = lyr.values.index_select(-2, keep.to(lyr.values.device))
+        else:
+            cache.key_cache[l] = cache.key_cache[l].index_select(-2, keep)
+            cache.value_cache[l] = cache.value_cache[l].index_select(-2, keep)
+
+
+# ---------------------------------------------------------------------------
+# Scoring
+# ---------------------------------------------------------------------------
+
+
+def importance_from_rows(rows: list[torch.Tensor], n: int, kernel: int) -> torch.Tensor:
+    """R-KV importance from recorded attention rows.
+
+    ``rows``: last alpha decode/prefill attention rows, each ``[heads, n_t]``
+    (already softmaxed by the model), recorded at increasing cache lengths
+    ``n_t <= n``. Rows are zero-padded on the right — identical to the causal
+    zeros the reference sees. Returns ``[n]`` fp32.
+    """
+    heads = rows[0].shape[0]
+    padded = torch.zeros(len(rows), heads, n, dtype=torch.float32)
+    for i, r in enumerate(rows):
+        padded[i, :, : r.shape[-1]] = r.float()
+    per_head = padded.mean(dim=0)  # [heads, n]
+    smoothed = F.max_pool1d(
+        per_head.unsqueeze(0), kernel_size=kernel, padding=kernel // 2, stride=1
+    ).squeeze(0)
+    return smoothed.max(dim=0).values  # head max-pool -> [n]
+
+
+def pick_kept(
+    arm: str,
+    n: int,
+    cfg: RKVMLAConfig,
+    layer_rows: list[list[torch.Tensor]],
+    layer_latents: list[torch.Tensor],
+    gen: torch.Generator,
+) -> torch.Tensor:
+    """Global kept-index set (ascending), window always kept."""
+    window = cfg.window_size
+    n_cand = n - window
+    n_keep = cfg.budget - window
+    win_idx = torch.arange(n - window, n)
+    if arm == "random":
+        perm = torch.randperm(n_cand, generator=gen)[:n_keep]
+        return torch.cat([perm.sort().values, win_idx])
+
+    zs = []
+    for rows, latents in zip(layer_rows, layer_latents):
+        imp = importance_from_rows(list(rows), n, cfg.kernel_size)[:n_cand]
+        if arm == "snapkv":
+            z = imp
+        else:  # rkv
+            red = redundancy_linear(latents[:n_cand].float(), cfg.threshold)
+            z = cfg.mix_lambda * imp - (1.0 - cfg.mix_lambda) * red
+        zs.append(z)
+    z = torch.stack(zs).mean(dim=0)
+    top = torch.topk(z, n_keep).indices.sort().values
+    return torch.cat([top, win_idx])
+
+
+# ---------------------------------------------------------------------------
+# Generation with periodic eviction
+# ---------------------------------------------------------------------------
+
+
+@torch.inference_mode()
+def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed):
+    device = model.device
+    n_layers = model.config.num_hidden_layers
+    gen = torch.Generator().manual_seed(seed)
+
+    latents: list[list[torch.Tensor]] = [[] for _ in range(n_layers)]  # CPU [t,512] chunks
+    hooks = []
+
+    def mk_hook(l):
+        def hook(_mod, _inp, out):
+            latents[l].append(out[0].detach().float().cpu())  # [T,512]
+        return hook
+
+    if arm in ("rkv",):  # only rkv needs latents
+        for l in range(n_layers):
+            hooks.append(
+                model.model.layers[l].self_attn.kv_a_layernorm.register_forward_hook(mk_hook(l))
+            )
+
+    rows: list[list[torch.Tensor]] = [[] for _ in range(n_layers)]  # obs rows, [heads, n_t] CPU
+
+    def record_rows(attentions, keep_last):
+        for l in range(n_layers):
+            a = attentions[l][0].detach().float().cpu()  # [heads, q_len, kv_len]
+            for q in range(max(0, a.shape[1] - keep_last), a.shape[1]):
+                rows[l].append(a[:, q, :])
+            del rows[l][:-cfg.window_size]
+
+    need_attn = arm in ("rkv", "snapkv")
+    T = prompt_ids.shape[1]
+    out = model(
+        input_ids=prompt_ids.to(device),
+        attention_mask=torch.ones(1, T, dtype=torch.long, device=device),
+        position_ids=torch.arange(T, device=device).unsqueeze(0),
+        use_cache=True,
+        output_attentions=need_attn,
+    )
+    cache = out.past_key_values
+    if need_attn:
+        record_rows(out.attentions, cfg.window_size)
+
+    generated: list[int] = []
+    abs_pos = T
+    n_evict = 0
+    eos = tok.eos_token_id
+    for _ in range(max_new):
+        nxt = int(out.logits[0, -1].argmax())
+        generated.append(nxt)
+        if nxt == eos:
+            break
+
+        if arm != "full" and cache_len(cache) >= cfg.budget + cfg.buffer:
+            n = cache_len(cache)
+            lay_lat = [torch.cat(latents[l])[:n] if latents[l] else None for l in range(n_layers)]
+            keep = pick_kept(arm, n, cfg, rows, lay_lat, gen)
+            gather_cache(cache, keep.to(device))
+            if arm == "rkv":
+                for l in range(n_layers):
+                    latents[l] = [lay_lat[l][keep]]
+            for l in range(n_layers):
+                rows[l].clear()  # stale indices after gather; refills in <= alpha steps
+            n_evict += 1
+
+        kv = cache_len(cache)
+        out = model(
+            input_ids=torch.tensor([[nxt]], device=device),
+            attention_mask=torch.ones(1, kv + 1, dtype=torch.long, device=device),
+            position_ids=torch.tensor([[abs_pos]], device=device),
+            past_key_values=cache,
+            use_cache=True,
+            output_attentions=need_attn,
+        )
+        cache = out.past_key_values
+        if need_attn:
+            record_rows(out.attentions, 1)
+        abs_pos += 1
+
+    for h in hooks:
+        h.remove()
+    return tok.decode(generated, skip_special_tokens=True), n_evict, cache_len(cache)
+
+
+# ---------------------------------------------------------------------------
+# GSM8K
+# ---------------------------------------------------------------------------
+
+_NUM = re.compile(r"-?\d[\d,]*\.?\d*")
+
+
+def extract_answer(text: str):
+    m = re.findall(r"####\s*(-?[\d,\.]+)", text)
+    cand = m[-1] if m else (_NUM.findall(text)[-1] if _NUM.findall(text) else None)
+    if cand is None:
+        return None
+    try:
+        return float(cand.replace(",", "").rstrip("."))
+    except ValueError:
+        return None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default="/data/zefan/models/DeepSeek-V2-Lite-Chat")
+    ap.add_argument("--data", default="/data/zefan/data/gsm8k_test.jsonl")
+    ap.add_argument("--arm", required=True, choices=["full", "rkv", "snapkv", "random"])
+    ap.add_argument("--budget", type=int, default=128)
+    ap.add_argument("--buffer", type=int, default=32)
+    ap.add_argument("--mix-lambda", type=float, default=0.1)
+    ap.add_argument("--n", type=int, default=50)
+    ap.add_argument("--max-new", type=int, default=640)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--out", required=True)
+    args = ap.parse_args()
+
+    cfg = RKVMLAConfig(
+        budget=args.budget, buffer=args.buffer, mix_lambda=args.mix_lambda,
+        global_selection=True,
+    )
+    tok = AutoTokenizer.from_pretrained(args.model)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, torch_dtype=torch.bfloat16, device_map="cuda:0",
+        attn_implementation="eager",
+    ).eval()
+
+    problems = [json.loads(l) for l in open(args.data)][: args.n]
+    results, correct = [], 0
+    t0 = time.time()
+    for i, p in enumerate(problems):
+        msgs = [{"role": "user", "content": p["question"]
+                 + "\nPlease reason step by step, and put your final answer after '####'."}]
+        ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt")
+        tw = time.time()
+        text, n_evict, final_kv = generate_one(
+            model, tok, ids, args.arm, cfg, args.max_new, args.seed + i
+        )
+        pred = extract_answer(text)
+        gold = extract_answer(p["answer"])
+        ok = pred is not None and gold is not None and abs(pred - gold) < 1e-6
+        correct += ok
+        results.append({
+            "i": i, "correct": bool(ok), "pred": pred, "gold": gold,
+            "n_evictions": n_evict, "final_kv": final_kv,
+            "gen_tokens": len(tok(text).input_ids), "wall_s": round(time.time() - tw, 1),
+        })
+        print(f"[{args.arm} b{args.budget}] {i+1}/{len(problems)} "
+              f"acc={correct}/{i+1} evict={n_evict} kv={final_kv} "
+              f"({results[-1]['wall_s']}s)", flush=True)
+
+    summary = {
+        "arm": args.arm, "budget": args.budget, "buffer": args.buffer,
+        "mix_lambda": args.mix_lambda, "n": len(problems),
+        "accuracy": correct / len(problems),
+        "mean_evictions": sum(r["n_evictions"] for r in results) / len(results),
+        "wall_total_s": round(time.time() - t0, 1),
+    }
+    json.dump({"summary": summary, "results": results}, open(args.out, "w"), indent=1)
+    print("SUMMARY " + json.dumps(summary), flush=True)
+
+
+if __name__ == "__main__":
+    main()
