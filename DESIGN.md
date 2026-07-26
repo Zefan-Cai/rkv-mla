@@ -218,17 +218,35 @@ slot — the verification exists precisely to make that impossible.
   contents depend on the *generation*, breaking content-addressed prefix reuse
   (both R-KV ports simply disable radix/prefix caching). ShadowRadix-style
   virtual-slot trees make this harder, not easier.
-- **MTP / speculative-decoding interaction — UNCONFIRMED.**
-  `index_share_for_mtp_iteration` reuses indexer selections across MTP draft
-  iterations, and our *working assumption* is that evicting between draft and
-  verify would dangle draft-selected slots, so eviction would have to be
-  fenced to accepted-token boundaries (never mid-draft). We have not verified
-  this against an actual MTP-serving implementation — the reuse might be
-  index-value-based rather than slot-based, or drafts might be re-validated
-  anyway, either of which would weaken the constraint. Since GLM-5.2 is
-  routinely served with MTP+EAGLE and no R-KV port supports speculative
-  decoding today, reading this out of the SGLang/vLLM MTP path (or a small
-  experiment) should happen before the integration is designed around it.
+- **MTP / speculative-decoding interaction — RESOLVED (verified in code,
+  2026-07-26; sglang @ e14068d, vllm @ 0934b26). Verdict: MIXED, and the
+  SGLang half is *stronger* than the old assumption.**
+  - **SGLang**: the IndexShare seed is **physical-slot-based** (fused top-k
+    returns page_size=1 KV slot ids consumed directly as the sparse page
+    table, `dsa/dsa_topk_backend.py`), and it **survives across the
+    accepted-token boundary**: draft-extend of iteration N captures the seed
+    (`models/deepseek_nextn.py`) and iteration N+1's draft loop consumes it
+    (`eagle_worker_v2.py`). So "evict only between engine steps" is
+    necessary but NOT sufficient — the evictor must additionally, per
+    affected request, **null `EagleDraftInput.dsa_topk_indices`** (the engine
+    self-heals: draft step 0 recomputes, CUDA graph falls back to eager for
+    one iteration) or remap the seed through the relocation map; under
+    overlap scheduling the relayed copy in `FutureMap` must be invalidated
+    too. Reuse is gated to `speculative_eagle_topk == 1` chain drafts, and
+    PD-disaggregation already disables fused top-k for exactly this reason —
+    a position-based-seed pathway an R-KV integration could piggyback on.
+  - **vLLM**: reuse is **logical-token-position-based**, re-translated
+    through the *live* block table on every sparse-attention call
+    (`flashmla_sparse.py` / `sparse_utils.py`), and the whole reuse window
+    lives inside one `propose()` within one engine step. Eviction between
+    engine steps with consistent block-table bookkeeping is sufficient as-is.
+  - "Drafts are re-validated at verify" holds in both engines for output
+    *correctness* (verify recomputes its own indexer top-k), but stale
+    physical slots would read freed/reallocated pool memory and collapse
+    acceptance rate — treat the fence as a throughput/hygiene requirement,
+    not merely academic. Mid-draft eviction remains forbidden in both engines
+    (per-forward metadata snapshots). No R-KV port supports speculative
+    decoding today.
 - **Softmax on indexer logits** is a design choice (see §2.2): it preserves
   R-KV's λ semantics but discards the logits' absolute scale, which may carry
   signal (a step whose top logit is huge is more "certain"). Alternatives
