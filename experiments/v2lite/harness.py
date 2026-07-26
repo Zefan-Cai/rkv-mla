@@ -120,8 +120,8 @@ def pick_kept(
         imp = importance_from_rows(list(rows), n, cfg.kernel_size)[:n_cand]
         if arm == "snapkv":
             z = imp
-        else:  # rkv
-            red = redundancy_linear(latents[:n_cand].float(), cfg.threshold)
+        else:  # rkv — redundancy on GPU, one small transfer back
+            red = redundancy_linear(latents[:n_cand].float(), cfg.threshold).cpu()
             z = cfg.mix_lambda * imp - (1.0 - cfg.mix_lambda) * red
         zs.append(z)
     z = torch.stack(zs).mean(dim=0)
@@ -145,7 +145,7 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed):
 
     def mk_hook(l):
         def hook(_mod, _inp, out):
-            latents[l].append(out[0].detach().float().cpu())  # [T,512]
+            latents[l].append(out[0].detach())  # [T,512] stays on GPU, no sync
         return hook
 
     if arm in ("rkv",):  # only rkv needs latents
@@ -191,6 +191,7 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed):
 
     generated: list[int] = []
     cur_impl = "sdpa"
+    evict_s = 0.0
     abs_pos = T
     n_evict = 0
     eos = tok.eos_token_id
@@ -201,16 +202,19 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed):
             break
 
         if arm != "full" and cache_len(cache) >= cfg.budget + cfg.buffer:
+            te = time.time()
             n = cache_len(cache)
             lay_lat = [torch.cat(latents[l])[:n] if latents[l] else None for l in range(n_layers)]
             keep = pick_kept(arm, n, cfg, rows, lay_lat, gen)
-            gather_cache(cache, keep.to(device))
+            keep_dev = keep.to(device)
+            gather_cache(cache, keep_dev)
             if arm == "rkv":
                 for l in range(n_layers):
-                    latents[l] = [lay_lat[l][keep]]
+                    latents[l] = [lay_lat[l][keep_dev]]
             for l in range(n_layers):
                 rows[l].clear()  # stale indices after gather; refills in <= alpha steps
             n_evict += 1
+            evict_s += time.time() - te
 
         kv = cache_len(cache)
         # Attention rows only matter for the window_size steps before the next
@@ -237,6 +241,8 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed):
 
     for h in hooks:
         h.remove()
+    if n_evict:
+        print(f"    [timing] evictions {n_evict}, evict total {evict_s:.1f}s", flush=True)
     return tok.decode(generated, skip_special_tokens=True), n_evict, cache_len(cache)
 
 
