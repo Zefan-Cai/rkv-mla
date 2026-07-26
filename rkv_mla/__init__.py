@@ -2,6 +2,7 @@
 
 from .algo import (
     RKVMLAConfig,
+    importance_from_attention,
     importance_from_logits,
     indexer_logits_recompute,
     joint_scores,
@@ -14,6 +15,7 @@ from .simulate import SimConfig, run_simulation
 
 __all__ = [
     "RKVMLAConfig",
+    "importance_from_attention",
     "importance_from_logits",
     "indexer_logits_recompute",
     "joint_scores",

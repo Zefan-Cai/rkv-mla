@@ -11,7 +11,10 @@ Core adaptations vs. original R-KV (MHA/GQA):
   one shared 576-dim entry per token, no per-head keys);
 - **importance comes from the DSA lightning-indexer logits** (engine-provided,
   or recomputed from cached indexer keys + an observation window of indexer
-  queries) instead of attention probabilities;
+  queries) instead of attention probabilities; for MLA models **without** a
+  DSA indexer (e.g. DeepSeek-V2-Lite) a third source recomputes attention of
+  cache-space observation queries over the shared entries
+  (`importance_from_attention`);
 - **redundancy** is key-cosine on the **512-dim latent part** of the shared
   entries by default (the 64 rope dims encode position, not content; the full
   576-dim entry remains available for ablation), with R-KV's exact rules, in
@@ -43,22 +46,33 @@ python3 -c "from rkv_mla.simulate import run_simulation; print(run_simulation())
 - [x] Per-group joint scoring `Z = λ·I − (1−λ)·R` (`rkv_mla/algo.py`)
 - [x] Importance source (a) indexer logits and (b) fallback recompute — proven
       equal in tests
+- [x] Importance source (c) recomputed attention for **indexer-less MLA
+      models** (`importance_from_attention`: cache-space queries over the
+      shared entries, `head_pool` max/mean, explicit `attn_scale_dim`) —
+      validated against a hand-rolled per-head softmax attention
 - [x] Redundancy naive == linear-exact (multiple shapes/seeds, n=1/2,
       all-similar, orthogonal, batched)
+- [x] **Reference parity**: `redundancy_naive` cross-checked against the
+      original R-KV `cal_similarity` (vendored verbatim from commit
+      `6715468b`) — exact match, no divergence
+      (`tests/test_reference_parity.py`)
 - [x] Dual-pool compaction + old→new remap + dangling-entry verification
       (`rkv_mla/eviction.py`)
 - [x] Decode simulation on a scaled-down `glm_moe_dsa` (2 groups × 4 layers,
-      budget 128 + buffer 32) with budget/window/consistency invariants
-      (`rkv_mla/simulate.py`)
-- [x] 123 CPU tests green
+      budget 128 + buffer 32) with budget/window/consistency invariants,
+      including an `importance_source="attention"` arm (`rkv_mla/simulate.py`)
+- [x] 279 CPU tests green
 - [ ] Real-model validation (below)
 
 ## Next steps
 
-1. **DeepSeek-V2-Lite GPU validation** — smallest open MLA model; wire the
-   scorer into a HF forward loop (recompute path; V2-Lite has no DSA indexer,
-   so use it to validate the MLA/dual-pool/no-re-rotation mechanics and
-   latent-cosine redundancy against full-KV baselines).
+1. **DeepSeek-V2-Lite GPU validation — now unblocked** — smallest open MLA
+   model (kv_lora_rank 512, qk_rope 64, no DSA indexer). The scoring side is
+   ready: `importance_from_attention` consumes cache-space observation queries
+   (absorbed form: `q_nope @ W_UK` ++ rotated `q_rope`). Remaining work is the
+   HF-hook harness that captures those queries and the shared cache entries
+   per layer, then compares eviction quality (latent-cosine redundancy,
+   MLA/dual-pool/no-re-rotation mechanics) against full-KV baselines.
 2. **DSA indexer-importance validation** — DeepSeek-V3.2-style or GLM-5.2
    checkpoints: compare indexer-logit importance vs recomputed-attention
    importance on real traces; confirm the latent-only redundancy default

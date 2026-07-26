@@ -81,6 +81,20 @@ smoothing. Two sources are implemented:
 The two sources agree bit-for-bit when the logits are generated from the same
 keys/queries (tested).
 
+**Indexer-less MLA models (e.g. DeepSeek-V2-Lite).** MLA models without a DSA
+indexer have no free importance oracle, so importance falls back to what R-KV
+itself does: recomputed attention of the last α observation queries — here in
+*absorbed cache space* (`q_nope @ W_UK` for the latent part, rotated `q_rope`
+for the rope part) dotted directly against the shared cached entries, so no
+per-head keys ever need materializing. `importance_from_attention` scales the
+logits by `1/sqrt(attn_scale_dim)` (explicit config: DeepSeek scales by the
+*pre-absorption* head dim, e.g. 128+64=192 for V2-Lite, while the cache-space
+dot product spans `kv_lora_rank + rope_dim` — the default), then runs exactly
+the indexer pipeline per query head (per-row softmax over past columns, mean
+over α rows), pools heads (`head_pool`: `"max"` matching R-KV's GQA group-max,
+or `"mean"`), and applies the shared max-pool smoothing. This is the
+importance source the DeepSeek-V2-Lite validation harness uses.
+
 The softmax step is retained deliberately: indexer logits are unnormalized
 non-negative ReLU sums whose scale drifts with context length; softmax makes
 importance a distribution over past tokens, scale-compatible with the
@@ -104,7 +118,10 @@ threshold 0.5, exempt each row's most-recent similar neighbour
 head-agnostic by construction here — arguably a *better* fit than in MHA
 R-KV, where per-head budgets fragment.
 
-Two implementations, asserted equal (rtol 1e-5):
+Two implementations, asserted equal (rtol 1e-5) and both cross-checked against
+the *original* R-KV `cal_similarity` (vendored verbatim from commit `6715468b`
+into `tests/test_reference_parity.py`; called with `heads=1` since ours is
+head-agnostic) — exact parity, no semantic divergence found:
 
 - `redundancy_naive` — faithful O(n²)-memory port of `cal_similarity`,
   including its quirk that a row with *no* similar neighbour still zeroes
@@ -222,7 +239,8 @@ slot — the verification exists precisely to make that impossible.
 
 ## 6. File map
 
-- `rkv_mla/algo.py` — scoring: importance (logits / recompute), redundancy
+- `rkv_mla/algo.py` — scoring: importance (indexer logits / indexer recompute /
+  recomputed attention for indexer-less MLA models), redundancy
   (naive / linear-exact), `joint_scores`, `select_indices` (per-group or
   global).
 - `rkv_mla/eviction.py` — `GroupCache`, dual-pool `compact_group` /
@@ -230,7 +248,13 @@ slot — the verification exists precisely to make that impossible.
 - `rkv_mla/simulate.py` — end-to-end decode simulation on random tensors
   shaped like a scaled-down `glm_moe_dsa` (8 layers = 2 groups of 4, entry
   64+16 dims, indexer 4×32, budget 128, buffer 32), asserting the budget /
-  window / consistency / finiteness invariants at every eviction.
+  window / consistency / finiteness invariants at every eviction;
+  `importance_source` arms: `"logits"`, `"recompute"`, `"attention"`.
 - `tests/` — CPU-only pytest suite (naive≡linear redundancy incl. n=1/2,
-  all-similar, orthogonal; logits≡recompute importance; group consistency;
-  compaction gather-equality; simulation invariants).
+  all-similar, orthogonal; logits≡recompute importance; attention importance
+  vs hand-rolled naive attention; group consistency; compaction
+  gather-equality; simulation invariants). `tests/test_reference_parity.py`
+  vendors the original R-KV `cal_similarity` verbatim (commit `6715468b`) and
+  proves `redundancy_naive` / `redundancy_linear` match it exactly across
+  seeds, sizes (n=2 … 400), thresholds, and key geometries (isotropic,
+  shared-mean anisotropic, duplicates, orthogonal).

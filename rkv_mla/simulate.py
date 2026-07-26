@@ -41,10 +41,13 @@ class SimConfig:
     rope_dim: int = 16
     idx_heads: int = 4
     idx_dim: int = 32
+    num_q_heads: int = 4                # attention heads for the "attention" arm
     prefill_len: int = 64
     decode_steps: int = 400
     seed: int = 0
-    importance_source: str = "logits"   # "logits" (engine-provided) or "recompute"
+    importance_source: str = "logits"   # "logits" (engine-provided), "recompute"
+                                        # (indexer fallback), or "attention"
+                                        # (indexer-less MLA: cache-space queries)
     rkv: RKVMLAConfig = field(
         default_factory=lambda: RKVMLAConfig(
             budget=128, buffer=32, window_size=8, kernel_size=7,
@@ -83,6 +86,7 @@ def run_simulation(sim: SimConfig | None = None) -> dict:
     # --- prefill: fill both pools for every group ---
     groups: list[GroupCache] = []
     query_buffers: list[deque] = []  # rolling (query, weight) per group, last `window`
+    attn_query_buffers: list[deque] = []  # rolling cache-space queries ("attention" arm)
     for _ in range(sim.num_groups):
         latents = [
             torch.randn(sim.prefill_len, sim.d_entry, generator=gen)
@@ -97,6 +101,7 @@ def run_simulation(sim: SimConfig | None = None) -> dict:
             )
         )
         query_buffers.append(deque(maxlen=cfg.window_size))
+        attn_query_buffers.append(deque(maxlen=cfg.window_size))
 
     stats = {"evictions": 0, "max_cache_len": sim.prefill_len, "kept_history": []}
     pos = sim.prefill_len
@@ -115,6 +120,12 @@ def run_simulation(sim: SimConfig | None = None) -> dict:
                 [cache.positions, torch.tensor([pos], dtype=torch.long)]
             )
             query_buffers[g].append((q, w))
+            if sim.importance_source == "attention":
+                # per-step cache-space observation query (absorbed form), as a
+                # V2-Lite-style HF-hook harness would produce it
+                attn_query_buffers[g].append(
+                    torch.randn(sim.num_q_heads, sim.d_entry, generator=gen)
+                )
         pos += 1
 
         n = len(groups[0])
@@ -127,35 +138,44 @@ def run_simulation(sim: SimConfig | None = None) -> dict:
         group_latents = [groups[g].latents[0] for g in range(sim.num_groups)]
         group_logits = None
         group_indexer = None
-        indexer_inputs = []
-        for g in range(sim.num_groups):
-            qs = torch.stack([q for q, _ in query_buffers[g]])
-            ws = torch.stack([w for _, w in query_buffers[g]])
-            indexer_inputs.append(
-                {
-                    "queries": qs,
-                    "weights": ws,
-                    "keys": groups[g].idx_keys,
-                    "scales": groups[g].idx_scales,
-                }
-            )
-        if sim.importance_source == "logits":
-            # Emulate engine-provided logits: the engine computes these every
-            # step for DSA top-k anyway; here they come from the same rolling
-            # observation window against the current indexer key pool.
-            from .algo import indexer_logits_recompute
-
-            group_logits = [
-                indexer_logits_recompute(
-                    d["queries"], d["weights"], d["keys"], d["scales"]
-                )
-                for d in indexer_inputs
+        group_q_entries = None
+        if sim.importance_source == "attention":
+            # (num_q_heads, alpha, d_entry) per group from the rolling buffer
+            group_q_entries = [
+                torch.stack(list(attn_query_buffers[g]), dim=1)
+                for g in range(sim.num_groups)
             ]
         else:
-            group_indexer = indexer_inputs
+            indexer_inputs = []
+            for g in range(sim.num_groups):
+                qs = torch.stack([q for q, _ in query_buffers[g]])
+                ws = torch.stack([w for _, w in query_buffers[g]])
+                indexer_inputs.append(
+                    {
+                        "queries": qs,
+                        "weights": ws,
+                        "keys": groups[g].idx_keys,
+                        "scales": groups[g].idx_scales,
+                    }
+                )
+            if sim.importance_source == "logits":
+                # Emulate engine-provided logits: the engine computes these every
+                # step for DSA top-k anyway; here they come from the same rolling
+                # observation window against the current indexer key pool.
+                from .algo import indexer_logits_recompute
+
+                group_logits = [
+                    indexer_logits_recompute(
+                        d["queries"], d["weights"], d["keys"], d["scales"]
+                    )
+                    for d in indexer_inputs
+                ]
+            else:
+                group_indexer = indexer_inputs
 
         kept_per_group = select_indices(
-            group_latents, cfg, group_logits=group_logits, group_indexer=group_indexer
+            group_latents, cfg, group_logits=group_logits,
+            group_indexer=group_indexer, group_q_entries=group_q_entries,
         )
         assert kept_per_group is not None
 

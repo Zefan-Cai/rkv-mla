@@ -13,7 +13,10 @@ which score per KV head on MHA/GQA models):
   the engine computes anyway every decode step over all past tokens. A fallback
   recomputes the logits from cached indexer keys + an observation window of
   indexer queries (ReLU-weighted sum over indexer heads, DeepSeek-style:
-  ``score(t, i) = sum_h w[t,h] * relu(q[t,h] . k[i])``).
+  ``score(t, i) = sum_h w[t,h] * relu(q[t,h] . k[i])``). For MLA models WITHOUT
+  a DSA indexer (e.g. DeepSeek-V2-Lite) a third source recomputes attention of
+  cache-space observation queries over the shared entries
+  (``importance_from_attention``).
 * Redundancy is cosine similarity on the shared entries -- by default only the
   512-dim latent part (the 64 rope dims encode position, not content; the full
   576-dim entry is kept behind ``RKVMLAConfig.redundancy_source`` for ablation) -- with
@@ -26,6 +29,7 @@ All tensors are plain torch tensors; everything runs on CPU.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -37,6 +41,7 @@ __all__ = [
     "redundancy_linear",
     "indexer_logits_recompute",
     "importance_from_logits",
+    "importance_from_attention",
     "joint_scores",
     "select_indices",
 ]
@@ -63,6 +68,14 @@ class RKVMLAConfig:
                                        # encode position, not content); "entry" = full 576-dim, kept for ablation
     redundancy_impl: str = "linear"    # "linear" or "naive"
     global_selection: bool = False     # one kept set across ALL groups (vLLM-port style)
+    # Attention-importance path (indexer-less MLA models, e.g. DeepSeek-V2-Lite):
+    head_pool: str = "max"             # pool per-head importance: "max" (R-KV's GQA
+                                       # group-max) or "mean"
+    attn_scale_dim: int | None = None  # logit scale = 1/sqrt(attn_scale_dim); None ->
+                                       # kv_lora_rank + rope_dim (the cache-space dim).
+                                       # DeepSeek scales by the PRE-absorption head dim
+                                       # (qk_nope_head_dim + qk_rope_head_dim), so set
+                                       # it explicitly to match a real model.
 
     def __post_init__(self):
         if self.budget - self.window_size <= 0:
@@ -71,6 +84,8 @@ class RKVMLAConfig:
             raise ValueError("redundancy_source must be 'entry' or 'latent'")
         if self.redundancy_impl not in ("linear", "naive"):
             raise ValueError("redundancy_impl must be 'linear' or 'naive'")
+        if self.head_pool not in ("max", "mean"):
+            raise ValueError("head_pool must be 'max' or 'mean'")
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +226,27 @@ def indexer_logits_recompute(
     return (F.relu(dots) * idx_weights.unsqueeze(-1)).sum(dim=1)
 
 
+def _window_softmax_mean(logits: torch.Tensor, window_size: int) -> torch.Tensor:
+    """Shared R-KV importance pipeline head: keep the last ``window_size`` rows,
+    softmax each row over the PAST columns (window columns excluded), mean over
+    rows. ``logits``: ``(..., obs, n)`` -> ``(..., n - window_size)``."""
+    n = logits.shape[-1]
+    if n <= window_size:
+        raise ValueError("need at least one past token beyond the window")
+    obs = logits[..., -window_size:, : n - window_size]       # (..., <=window, n - window)
+    w = F.softmax(obs, dim=-1, dtype=torch.float32).to(logits.dtype)
+    return w.mean(dim=-2)                                     # (..., n - window)
+
+
+def _maxpool_smooth(imp: torch.Tensor, kernel_size: int) -> torch.Tensor:
+    """Shared R-KV importance pipeline tail: max-pool smoothing (``kernel_size``,
+    stride 1, same padding). ``imp``: ``(n_past,)`` -> ``(n_past,)``."""
+    return F.max_pool1d(
+        imp.view(1, 1, -1), kernel_size=kernel_size,
+        padding=kernel_size // 2, stride=1,
+    ).view(-1)
+
+
 def importance_from_logits(
     logits: torch.Tensor, window_size: int = 8, kernel_size: int = 7
 ) -> torch.Tensor:
@@ -226,17 +262,45 @@ def importance_from_logits(
 
     Returns ``(n - window_size,)`` importance over past tokens.
     """
-    n = logits.shape[-1]
-    if n <= window_size:
-        raise ValueError("need at least one past token beyond the window")
-    obs = logits[-window_size:, : n - window_size]            # (<=window, n - window)
-    w = F.softmax(obs, dim=-1, dtype=torch.float32).to(logits.dtype)
-    imp = w.mean(dim=0)                                       # (n - window,)
-    imp = F.max_pool1d(
-        imp.view(1, 1, -1), kernel_size=kernel_size,
-        padding=kernel_size // 2, stride=1,
-    ).view(-1)
-    return imp
+    return _maxpool_smooth(
+        _window_softmax_mean(logits, window_size), kernel_size
+    )
+
+
+def importance_from_attention(
+    q_entries: torch.Tensor, entries: torch.Tensor, cfg: RKVMLAConfig
+) -> torch.Tensor:
+    """Importance from recomputed absorbed-MLA attention logits -- the path for
+    MLA models WITHOUT a DSA lightning indexer (e.g. DeepSeek-V2-Lite).
+
+    * ``q_entries``: ``(num_q_heads, alpha, kv_lora_rank + rope_dim)`` -- the
+      last ``alpha`` observation queries, already projected into cache space
+      (absorbed form: ``q_nope @ W_UK`` for the latent part, rotated ``q_rope``
+      for the rope part).
+    * ``entries``: ``(n, kv_lora_rank + rope_dim)`` -- the shared cached entries
+      (``c_kv`` ++ rotated ``k_rope``), as elsewhere in this repo.
+
+    ``logits[h, t, i] = q_entries[h, t] . entries[i] / sqrt(attn_scale_dim)``
+    with ``attn_scale_dim`` defaulting to ``kv_lora_rank + rope_dim`` (DeepSeek
+    scales by the pre-absorption head dim; set ``cfg.attn_scale_dim`` to match
+    a real model). Then EXACTLY the R-KV pipeline of the indexer path: per-row
+    softmax over past columns (window excluded), mean over the alpha rows --
+    per head -- then head pooling (``cfg.head_pool``: "max", matching R-KV's
+    GQA group-max, or "mean"), then the shared max-pool smoothing.
+
+    Returns ``(n - window_size,)`` importance over past tokens.
+    """
+    scale_dim = (
+        cfg.attn_scale_dim if cfg.attn_scale_dim is not None
+        else cfg.kv_lora_rank + cfg.rope_dim
+    )
+    logits = torch.einsum("htd,nd->htn", q_entries, entries) / math.sqrt(scale_dim)
+    per_head = _window_softmax_mean(logits, cfg.window_size)  # (heads, n - window)
+    if cfg.head_pool == "max":
+        imp = per_head.max(dim=0).values
+    else:  # "mean" (validated in __post_init__)
+        imp = per_head.mean(dim=0)
+    return _maxpool_smooth(imp, cfg.kernel_size)
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +316,7 @@ def joint_scores(
     idx_weights: torch.Tensor | None = None,
     idx_keys: torch.Tensor | None = None,
     idx_scales: torch.Tensor | None = None,
+    q_entries: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Joint R-KV score for one indexer group.
 
@@ -260,23 +325,31 @@ def joint_scores(
 
     ``latents``: ``(n, d_entry)`` shared per-token entries of the group's
     indexer-owning layer. Importance comes from ``indexer_logits`` (source (a),
-    engine-provided) when given, else it is recomputed from
-    ``idx_queries/idx_weights/idx_keys[/idx_scales]`` (source (b), fallback).
+    engine-provided) when given, else from ``q_entries`` (source (c), recomputed
+    attention of cache-space observation queries over the shared entries -- the
+    path for indexer-less MLA models like DeepSeek-V2-Lite), else it is
+    recomputed from ``idx_queries/idx_weights/idx_keys[/idx_scales]``
+    (source (b), fallback).
 
     As in the reference, redundancy is softmax-normalised over ALL ``n`` tokens
     and then sliced to the past; importance is normalised over past tokens only.
     """
-    if indexer_logits is None:
+    if indexer_logits is not None:
+        imp = importance_from_logits(
+            indexer_logits, window_size=cfg.window_size, kernel_size=cfg.kernel_size
+        )
+    elif q_entries is not None:
+        imp = importance_from_attention(q_entries, latents, cfg)
+    else:
         if idx_queries is None or idx_weights is None or idx_keys is None:
             raise ValueError(
-                "need indexer_logits, or idx_queries + idx_weights + idx_keys"
+                "need indexer_logits, q_entries, or "
+                "idx_queries + idx_weights + idx_keys"
             )
-        indexer_logits = indexer_logits_recompute(
-            idx_queries, idx_weights, idx_keys, idx_scales
+        imp = importance_from_logits(
+            indexer_logits_recompute(idx_queries, idx_weights, idx_keys, idx_scales),
+            window_size=cfg.window_size, kernel_size=cfg.kernel_size,
         )
-    imp = importance_from_logits(
-        indexer_logits, window_size=cfg.window_size, kernel_size=cfg.kernel_size
-    )
     red = _redundancy(latents, cfg)[: latents.shape[0] - cfg.window_size]
     return cfg.mix_lambda * imp - (1.0 - cfg.mix_lambda) * red
 
@@ -286,6 +359,7 @@ def select_indices(
     cfg: RKVMLAConfig,
     group_logits: list[torch.Tensor] | None = None,
     group_indexer: list[dict] | None = None,
+    group_q_entries: list[torch.Tensor] | None = None,
 ) -> list[torch.Tensor] | None:
     """Which tokens survive compression, per 4-layer indexer group.
 
@@ -293,8 +367,10 @@ def select_indices(
       indexer-owning layer (all layers in a group must keep the SAME token set,
       so one latent tensor per group suffices for scoring).
     * ``group_logits[g]``: ``(obs, n)`` engine-provided indexer logits, or None
-      to use ``group_indexer[g]`` = dict with keys ``queries``, ``weights``,
-      ``keys`` and optional ``scales`` (fallback recompute).
+      to use ``group_q_entries[g]`` = ``(num_q_heads, alpha, d_entry)``
+      cache-space observation queries (attention importance, for indexer-less
+      MLA models), or ``group_indexer[g]`` = dict with keys ``queries``,
+      ``weights``, ``keys`` and optional ``scales`` (fallback recompute).
 
     Returns a list of ``(budget,)`` LongTensors of kept indices in ascending
     temporal order -- one per group (identical tensors when
@@ -312,6 +388,7 @@ def select_indices(
     for g in range(num_groups):
         logits = group_logits[g] if group_logits is not None else None
         idx = group_indexer[g] if group_indexer is not None else {}
+        q_entries = group_q_entries[g] if group_q_entries is not None else None
         z = joint_scores(
             group_latents[g],
             cfg,
@@ -320,6 +397,7 @@ def select_indices(
             idx_weights=idx.get("weights"),
             idx_keys=idx.get("keys"),
             idx_scales=idx.get("scales"),
+            q_entries=q_entries,
         )
         if not bool(torch.isfinite(z).all()):
             raise FloatingPointError(f"non-finite R-KV scores in group {g}")
