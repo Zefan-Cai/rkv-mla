@@ -165,6 +165,16 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed):
 
     need_attn = arm in ("rkv", "snapkv")
     arm_thresh = cfg.budget + cfg.buffer  # eviction trigger
+
+    def _set_impl(impl):
+        # transformers 5.x dispatches per-forward on this attribute; sdpa
+        # silently returns attentions=None, so capture steps must run eager.
+        model.config._attn_implementation = impl
+        for lyr in model.model.layers:
+            lyr.self_attn.config._attn_implementation = impl
+
+    if need_attn:
+        _set_impl("eager")
     T = prompt_ids.shape[1]
     out = model(
         input_ids=prompt_ids.to(device),
@@ -175,9 +185,12 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed):
     )
     cache = out.past_key_values
     if need_attn:
+        assert out.attentions and out.attentions[0] is not None, "eager capture failed"
         record_rows(out.attentions, cfg.window_size)
+        _set_impl("sdpa")
 
     generated: list[int] = []
+    cur_impl = "sdpa"
     abs_pos = T
     n_evict = 0
     eos = tok.eos_token_id
@@ -204,6 +217,10 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed):
         # trigger; skipping output_attentions elsewhere avoids 47 GPU->CPU
         # copies per step (the dominant per-step overhead on long generations).
         want_attn = need_attn and (kv + 1 >= arm_thresh - cfg.window_size)
+        if want_attn and cur_impl != "eager":
+            _set_impl("eager"); cur_impl = "eager"
+        elif not want_attn and cur_impl != "sdpa":
+            _set_impl("sdpa"); cur_impl = "sdpa"
         out = model(
             input_ids=torch.tensor([[nxt]], device=device),
             attention_mask=torch.ones(1, kv + 1, dtype=torch.long, device=device),
@@ -214,6 +231,7 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed):
         )
         cache = out.past_key_values
         if want_attn:
+            assert out.attentions and out.attentions[0] is not None, "eager capture failed"
             record_rows(out.attentions, 1)
         abs_pos += 1
 
@@ -297,10 +315,9 @@ def main():
         global_selection=True,
     )
     tok = AutoTokenizer.from_pretrained(args.model)
-    impl = "eager" if args.arm in ("rkv", "snapkv") else "sdpa"
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype=torch.bfloat16, device_map="cuda:0",
-        attn_implementation=impl,
+        attn_implementation="sdpa",
     ).eval()
 
     problems = [json.loads(l) for l in open(args.data)][: args.n]
