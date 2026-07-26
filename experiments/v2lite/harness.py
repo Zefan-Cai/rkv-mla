@@ -264,6 +264,8 @@ def main():
         msgs = [{"role": "user", "content": p["question"]
                  + "\nPlease reason step by step, and put your final answer after '####'."}]
         ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt")
+        if not torch.is_tensor(ids):  # 5.x returns a BatchEncoding
+            ids = ids["input_ids"]
         tw = time.time()
         text, n_evict, final_kv = generate_one(
             model, tok, ids, args.arm, cfg, args.max_new, args.seed + i
