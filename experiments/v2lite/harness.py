@@ -59,10 +59,12 @@ def cache_len(cache) -> int:
     return cache.key_cache[0].shape[-2]
 
 
-def gather_cache(cache, keep: torch.Tensor) -> None:
-    """In-place: keep only ``keep`` (ascending LongTensor) positions, all layers."""
+def gather_cache(cache, keep) -> None:
+    """In-place gather; ``keep`` is one LongTensor or a per-layer list."""
     n_layers = len(cache.layers) if hasattr(cache, "layers") else len(cache.key_cache)
+    keeps = keep if isinstance(keep, list) else [keep] * n_layers
     for l in range(n_layers):
+        keep = keeps[l]
         if hasattr(cache, "layers"):
             lyr = cache.layers[l]
             lyr.keys = lyr.keys.index_select(-2, keep.to(lyr.keys.device))
@@ -105,6 +107,7 @@ def pick_kept(
     layer_rows: list[list[torch.Tensor]],
     layer_latents: list[torch.Tensor],
     gen: torch.Generator,
+    per_layer: bool = False,
 ) -> torch.Tensor:
     """Global kept-index set (ascending), window always kept."""
     window = cfg.window_size
@@ -124,6 +127,12 @@ def pick_kept(
             red = redundancy_linear(latents[:n_cand].float(), cfg.threshold).cpu()
             z = cfg.mix_lambda * imp - (1.0 - cfg.mix_lambda) * red
         zs.append(z)
+    if per_layer:
+        keeps = []
+        for z in zs:
+            top = torch.topk(z, n_keep).indices.sort().values
+            keeps.append(torch.cat([top, win_idx]))
+        return keeps
     z = torch.stack(zs).mean(dim=0)
     top = torch.topk(z, n_keep).indices.sort().values
     return torch.cat([top, win_idx])
@@ -135,7 +144,7 @@ def pick_kept(
 
 
 @torch.inference_mode()
-def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed, stop_ids=None):
+def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed, stop_ids=None, per_layer=False):
     device = model.device
     n_layers = model.config.num_hidden_layers
     gen = torch.Generator().manual_seed(seed)
@@ -212,12 +221,16 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed, stop_ids=None)
                     lay_lat.append(k[0].permute(1, 0, 2).reshape(n, -1))  # [n, heads*dim]
             else:
                 lay_lat = [torch.cat(latents[l])[:n] if latents[l] else None for l in range(n_layers)]
-            keep = pick_kept(arm, n, cfg, rows, lay_lat, gen)
-            keep_dev = keep.to(device)
+            keep = pick_kept(arm, n, cfg, rows, lay_lat, gen, per_layer=per_layer)
+            if isinstance(keep, list):
+                keep_dev = [k.to(device) for k in keep]
+            else:
+                keep_dev = keep.to(device)
             gather_cache(cache, keep_dev)
             if arm == "rkv" and has_latent:
                 for l in range(n_layers):
-                    latents[l] = [lay_lat[l][keep_dev]]
+                    kd = keep_dev[l] if isinstance(keep_dev, list) else keep_dev
+                    latents[l] = [lay_lat[l][kd]]
             for l in range(n_layers):
                 rows[l].clear()  # stale indices after gather; refills in <= alpha steps
             n_evict += 1
@@ -313,6 +326,7 @@ def main():
     ap.add_argument("--model", default="/data/zefan/models/DeepSeek-V2-Lite-Chat")
     ap.add_argument("--data", default="/data/zefan/data/gsm8k_test.jsonl")
     ap.add_argument("--dataset-format", default="gsm8k", choices=["gsm8k", "math"])
+    ap.add_argument("--per-layer", action="store_true", help="independent kept set per layer")
     ap.add_argument("--arm", required=True, choices=["full", "rkv", "snapkv", "random"])
     ap.add_argument("--budget", type=int, default=128)
     ap.add_argument("--buffer", type=int, default=32)
@@ -355,7 +369,7 @@ def main():
         tw = time.time()
         text, n_evict, final_kv = generate_one(
             model, tok, ids, args.arm, cfg, args.max_new, args.seed + i,
-            stop_ids=stop_ids,
+            stop_ids=stop_ids, per_layer=args.per_layer,
         )
         pred = extract_answer(text, fmt)
         gold = _norm(str(p["answer"])) if fmt == "math" else extract_answer(str(p["answer"]))
