@@ -148,7 +148,8 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed, stop_ids=None)
             latents[l].append(out[0].detach())  # [T,512] stays on GPU, no sync
         return hook
 
-    if arm in ("rkv",):  # only rkv needs latents
+    has_latent = hasattr(model.model.layers[0].self_attn, "kv_a_layernorm")
+    if arm == "rkv" and has_latent:
         for l in range(n_layers):
             hooks.append(
                 model.model.layers[l].self_attn.kv_a_layernorm.register_forward_hook(mk_hook(l))
@@ -204,11 +205,17 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed, stop_ids=None)
         if arm != "full" and cache_len(cache) >= cfg.budget + cfg.buffer:
             te = time.time()
             n = cache_len(cache)
-            lay_lat = [torch.cat(latents[l])[:n] if latents[l] else None for l in range(n_layers)]
+            if arm == "rkv" and not has_latent:
+                lay_lat = []
+                for l in range(n_layers):
+                    k = cache.layers[l].keys if hasattr(cache, "layers") else cache.key_cache[l]
+                    lay_lat.append(k[0].permute(1, 0, 2).reshape(n, -1))  # [n, heads*dim]
+            else:
+                lay_lat = [torch.cat(latents[l])[:n] if latents[l] else None for l in range(n_layers)]
             keep = pick_kept(arm, n, cfg, rows, lay_lat, gen)
             keep_dev = keep.to(device)
             gather_cache(cache, keep_dev)
-            if arm == "rkv":
+            if arm == "rkv" and has_latent:
                 for l in range(n_layers):
                     latents[l] = [lay_lat[l][keep_dev]]
             for l in range(n_layers):
