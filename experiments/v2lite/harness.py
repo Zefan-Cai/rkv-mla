@@ -135,7 +135,7 @@ def pick_kept(
 
 
 @torch.inference_mode()
-def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed):
+def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed, stop_ids=None):
     device = model.device
     n_layers = model.config.num_hidden_layers
     gen = torch.Generator().manual_seed(seed)
@@ -194,11 +194,11 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed):
     evict_s = 0.0
     abs_pos = T
     n_evict = 0
-    eos = tok.eos_token_id
+    stops = set(stop_ids or []) | {tok.eos_token_id}
     for _ in range(max_new):
         nxt = int(out.logits[0, -1].argmax())
         generated.append(nxt)
-        if nxt == eos:
+        if nxt in stops:
             break
 
         if arm != "full" and cache_len(cache) >= cfg.budget + cfg.buffer:
@@ -321,6 +321,12 @@ def main():
         global_selection=True,
     )
     tok = AutoTokenizer.from_pretrained(args.model)
+    from transformers import GenerationConfig
+    try:
+        _g = GenerationConfig.from_pretrained(args.model).eos_token_id
+        stop_ids = _g if isinstance(_g, list) else [_g]
+    except Exception:
+        stop_ids = [tok.eos_token_id]
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype=torch.bfloat16, device_map="cuda:0",
         attn_implementation="sdpa",
@@ -341,7 +347,8 @@ def main():
             ids = ids["input_ids"]
         tw = time.time()
         text, n_evict, final_kv = generate_one(
-            model, tok, ids, args.arm, cfg, args.max_new, args.seed + i
+            model, tok, ids, args.arm, cfg, args.max_new, args.seed + i,
+            stop_ids=stop_ids,
         )
         pred = extract_answer(text, fmt)
         gold = _norm(str(p["answer"])) if fmt == "math" else extract_answer(str(p["answer"]))
