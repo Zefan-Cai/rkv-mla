@@ -25,7 +25,9 @@ Arms:
 
 Decode-time periodic eviction: trigger when cache_len >= budget + buffer,
 keep budget tokens (window always kept), identical set across all 27 layers
-(global selection, matching the R-KV vLLM port).
+(global selection, matching the R-KV vLLM port). ``--per-layer`` selects an
+independent set per layer; ``--per-head`` (MHA models only) selects an
+independent set per KV head per layer, matching the reference R-KV granularity.
 """
 from __future__ import annotations
 
@@ -74,6 +76,34 @@ def gather_cache(cache, keep) -> None:
             cache.value_cache[l] = cache.value_cache[l].index_select(-2, keep)
 
 
+def _layer_keys(cache, layer):
+    if hasattr(cache, "layers"):
+        return cache.layers[layer].keys
+    return cache.key_cache[layer]
+
+
+def gather_cache_per_head(cache, keeps) -> None:
+    """In-place per-KV-head gather; ``keeps`` is a per-layer list of
+    ``[kv_heads, budget]`` LongTensors. The cache stays rectangular:
+    every head keeps ``budget`` (its own) tokens."""
+    n_layers = len(cache.layers) if hasattr(cache, "layers") else len(cache.key_cache)
+    for l in range(n_layers):
+        if hasattr(cache, "layers"):
+            lyr = cache.layers[l]
+            k, v = lyr.keys, lyr.values
+        else:
+            k, v = cache.key_cache[l], cache.value_cache[l]
+        idx = keeps[l].to(k.device)
+        kv_heads, budget = idx.shape
+        g = idx.unsqueeze(0).unsqueeze(-1).expand(1, kv_heads, budget, k.shape[-1])
+        if hasattr(cache, "layers"):
+            lyr.keys = torch.gather(k, -2, g)
+            lyr.values = torch.gather(v, -2, g)
+        else:
+            cache.key_cache[l] = torch.gather(k, -2, g)
+            cache.value_cache[l] = torch.gather(v, -2, g)
+
+
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
@@ -98,6 +128,28 @@ def importance_from_rows(rows: list[torch.Tensor], n: int, kernel: int) -> torch
         per_head.unsqueeze(0), kernel_size=kernel, padding=kernel // 2, stride=1
     ).squeeze(0)
     return smoothed.max(dim=0).values  # head max-pool -> [n]
+
+
+def importance_per_kv_head(
+    rows: list[torch.Tensor], n: int, kernel: int, kv_heads: int
+) -> torch.Tensor:
+    """Per-KV-head R-KV importance: mean over the alpha rows and max-pool
+    smoothing per q-head, then max over each GQA group (consecutive-chunk
+    q->kv mapping, matching HF ``repeat_kv`` and R-KV's group-max).
+    Returns ``[kv_heads, n]`` fp32.
+    """
+    if not rows:
+        return torch.zeros(kv_heads, n, dtype=torch.float32)
+    q_heads = rows[0].shape[0]
+    assert q_heads % kv_heads == 0, (q_heads, kv_heads)
+    padded = torch.zeros(len(rows), q_heads, n, dtype=torch.float32)
+    for i, r in enumerate(rows):
+        padded[i, :, : r.shape[-1]] = r.float()
+    per_head = padded.mean(dim=0)  # [q_heads, n]
+    smoothed = F.max_pool1d(
+        per_head.unsqueeze(0), kernel_size=kernel, padding=kernel // 2, stride=1
+    ).squeeze(0)
+    return smoothed.view(kv_heads, q_heads // kv_heads, n).max(dim=1).values
 
 
 def pick_kept(
@@ -138,13 +190,63 @@ def pick_kept(
     return torch.cat([top, win_idx])
 
 
+def pick_kept_per_head(
+    arm: str,
+    n: int,
+    cfg: RKVMLAConfig,
+    layer_rows: list[list[torch.Tensor]],
+    layer_keys: list[torch.Tensor],
+    gen: torch.Generator,
+) -> list[torch.Tensor]:
+    """Per-KV-head kept sets (MHA/GQA models, reference R-KV granularity).
+
+    ``layer_keys[l]``: the layer's cached keys ``[1, kv_heads, n, head_dim]``.
+    Returns one ``[kv_heads, budget]`` LongTensor per layer, each row ascending,
+    trailing window always kept in every head.
+    """
+    window = cfg.window_size
+    n_cand = n - window
+    n_keep = cfg.budget - window
+    keeps = []
+    for rows, keys in zip(layer_rows, layer_keys):
+        kv_heads = keys.shape[1]
+        win_idx = torch.arange(n - window, n).unsqueeze(0).expand(kv_heads, -1)
+        if arm == "random":
+            top = torch.stack(
+                [torch.randperm(n_cand, generator=gen)[:n_keep] for _ in range(kv_heads)]
+            )
+        else:
+            imp = importance_per_kv_head(list(rows), n, cfg.kernel_size, kv_heads)[:, :n_cand]
+            if arm == "snapkv":
+                z = imp
+            else:  # rkv — batched per-head redundancy on the cache keys
+                red = redundancy_linear(keys[0, :, :n_cand].float(), cfg.threshold).cpu()
+                z = cfg.mix_lambda * imp - (1.0 - cfg.mix_lambda) * red
+            top = torch.topk(z, n_keep, dim=-1).indices
+        keeps.append(torch.cat([top.sort(dim=-1).values, win_idx], dim=-1))
+    return keeps
+
+
+def per_head_overlap(keeps: list[torch.Tensor]) -> float:
+    """Mean pairwise overlap fraction between per-head kept sets, over layers."""
+    fracs = []
+    for kp in keeps:
+        h, b = kp.shape
+        sets = [set(kp[i].tolist()) for i in range(h)]
+        for i in range(h):
+            for j in range(i + 1, h):
+                fracs.append(len(sets[i] & sets[j]) / b)
+    return sum(fracs) / len(fracs)
+
+
 # ---------------------------------------------------------------------------
 # Generation with periodic eviction
 # ---------------------------------------------------------------------------
 
 
 @torch.inference_mode()
-def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed, stop_ids=None, per_layer=False):
+def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed, stop_ids=None,
+                 per_layer=False, per_head=False):
     device = model.device
     n_layers = model.config.num_hidden_layers
     gen = torch.Generator().manual_seed(seed)
@@ -214,23 +316,31 @@ def generate_one(model, tok, prompt_ids, arm, cfg, max_new, seed, stop_ids=None,
         if arm != "full" and cache_len(cache) >= cfg.budget + cfg.buffer:
             te = time.time()
             n = cache_len(cache)
-            if arm == "rkv" and not has_latent:
-                lay_lat = []
-                for l in range(n_layers):
-                    k = cache.layers[l].keys if hasattr(cache, "layers") else cache.key_cache[l]
-                    lay_lat.append(k[0].permute(1, 0, 2).reshape(n, -1))  # [n, heads*dim]
+            if per_head:
+                layer_keys = [_layer_keys(cache, l) for l in range(n_layers)]
+                keeps = pick_kept_per_head(arm, n, cfg, rows, layer_keys, gen)
+                if n_evict == 0:
+                    print(f"    [per-head] first-eviction mean pairwise kept-set "
+                          f"overlap {per_head_overlap(keeps):.3f}", flush=True)
+                gather_cache_per_head(cache, keeps)
             else:
-                lay_lat = [torch.cat(latents[l])[:n] if latents[l] else None for l in range(n_layers)]
-            keep = pick_kept(arm, n, cfg, rows, lay_lat, gen, per_layer=per_layer)
-            if isinstance(keep, list):
-                keep_dev = [k.to(device) for k in keep]
-            else:
-                keep_dev = keep.to(device)
-            gather_cache(cache, keep_dev)
-            if arm == "rkv" and has_latent:
-                for l in range(n_layers):
-                    kd = keep_dev[l] if isinstance(keep_dev, list) else keep_dev
-                    latents[l] = [lay_lat[l][kd]]
+                if arm == "rkv" and not has_latent:
+                    lay_lat = []
+                    for l in range(n_layers):
+                        k = cache.layers[l].keys if hasattr(cache, "layers") else cache.key_cache[l]
+                        lay_lat.append(k[0].permute(1, 0, 2).reshape(n, -1))  # [n, heads*dim]
+                else:
+                    lay_lat = [torch.cat(latents[l])[:n] if latents[l] else None for l in range(n_layers)]
+                keep = pick_kept(arm, n, cfg, rows, lay_lat, gen, per_layer=per_layer)
+                if isinstance(keep, list):
+                    keep_dev = [k.to(device) for k in keep]
+                else:
+                    keep_dev = keep.to(device)
+                gather_cache(cache, keep_dev)
+                if arm == "rkv" and has_latent:
+                    for l in range(n_layers):
+                        kd = keep_dev[l] if isinstance(keep_dev, list) else keep_dev
+                        latents[l] = [lay_lat[l][kd]]
             for l in range(n_layers):
                 rows[l].clear()  # stale indices after gather; refills in <= alpha steps
             n_evict += 1
@@ -327,6 +437,8 @@ def main():
     ap.add_argument("--data", default="/data/zefan/data/gsm8k_test.jsonl")
     ap.add_argument("--dataset-format", default="gsm8k", choices=["gsm8k", "math"])
     ap.add_argument("--per-layer", action="store_true", help="independent kept set per layer")
+    ap.add_argument("--per-head", action="store_true",
+                    help="independent kept set per KV head per layer (MHA/GQA models only)")
     ap.add_argument("--arm", required=True, choices=["full", "rkv", "snapkv", "random"])
     ap.add_argument("--budget", type=int, default=128)
     ap.add_argument("--buffer", type=int, default=32)
@@ -336,6 +448,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+    if args.per_head and args.per_layer:
+        ap.error("--per-head already implies independent per-layer sets; pick one")
 
     cfg = RKVMLAConfig(
         budget=args.budget, buffer=args.buffer, mix_lambda=args.mix_lambda,
@@ -352,6 +466,13 @@ def main():
         args.model, torch_dtype=torch.bfloat16, device_map="cuda:0",
         attn_implementation="sdpa",
     ).eval()
+    if args.per_head and hasattr(model.model.layers[0].self_attn, "kv_a_layernorm"):
+        raise SystemExit(
+            "--per-head requires per-head KV caches. This model is MLA "
+            "(kv_a_layernorm present): all query heads share ONE cached entry per "
+            "token, so per-head retention does not exist structurally. Use "
+            "--per-layer or global selection instead."
+        )
 
     problems = [json.loads(l) for l in open(args.data)][: args.n]
     results, correct = [], 0
@@ -369,7 +490,7 @@ def main():
         tw = time.time()
         text, n_evict, final_kv = generate_one(
             model, tok, ids, args.arm, cfg, args.max_new, args.seed + i,
-            stop_ids=stop_ids, per_layer=args.per_layer,
+            stop_ids=stop_ids, per_layer=args.per_layer, per_head=args.per_head,
         )
         pred = extract_answer(text, fmt)
         gold = _norm(str(p["answer"])) if fmt == "math" else extract_answer(str(p["answer"]))
